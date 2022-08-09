@@ -1,92 +1,164 @@
-import XRay from "x-ray";
-import { CommonHandlers, ScraperConfig, Targets } from "../shared";
-import runner from "../shared/xray";
+import axios from "axios";
+import parse from "node-html-parser";
 import { Work } from "./work";
 
-const DATA_TARGETS: Targets<IUserData> = {
-  name: {
-    context: '.primary.header h2.heading',
-    handler: CommonHandlers.cleanString,
-  },
-  icon: {
-    context: '.primary.header p.icon img@src',
-    handler: CommonHandlers.cleanString
-  },
-  title: {
-    context: '.user.home.profile h3.heading',
-    handler: CommonHandlers.cleanString,
-    sub: '/profile'
-  },
-  birthday: {
-    context: '.user.home.profile dd.birthday',
-    handler: CommonHandlers.cleanString,
-    sub: '/profile'
-  },
-  bio: {
-    context: 'div.bio.module blockquote',
-    sub: '/profile',
-  }
-}
+const BASE_URL = "https://archiveofourown.org/users";
 
-export interface IUserData{
-  name?: string;
-  icon?: string;
-  title?: string;
-  userid?: string;
-  birthday?: string;
-  bio?: string;
-}
-
-export class User {
-
+export class Profile {
   username: string;
+
+  displayName?: string;
+  title?: string;
+  pseuds?: string[];
+  birthday?: string;
+
   isResolved: boolean = false;
   lastResolved: Date | null = null;
-  userData: IUserData = {};
-  works: Map<string, Work>  = new Map<string, Work>();
-  error?: any;
 
   constructor(username: string) {
     this.username = username;
   }
 
-  async resolve() {
-    const base = `users/${this.username}`;
-    const wrapper = (context: string, selector?: XRay.Selector, sub: string = '') => runner(`${base}${sub}`, context, selector);
+  public async resolve() {
+    const page = await axios.get(
+      `${BASE_URL}/${encodeURI(this.username)}/profile`
+    );
+    const profile = parse(page.data).querySelector(
+      "#main.profile-show.dashboard.region"
+    );
+    if (profile) {
+      this.displayName = (profile.querySelector("h2.heading")?.text ?? "")
+        .replace(/[\n\t]*/g, "")
+        .trim();
+      this.title = (profile.querySelector("h3.heading")?.text ?? "")
+        .replace(/[\n\t]*/g, "")
+        .trim();
+      const meta = profile.querySelector(".meta");
+      if (meta) {
+        this.pseuds =
+          meta
+            ?.querySelector("dd.pseuds")
+            ?.querySelectorAll("a")
+            ?.map((element) => element.text) ?? [];
 
-    const promiseCollection: Promise<void>[] = [];
-
-    Object.entries(DATA_TARGETS).forEach(([key, config]) => {
-      if (config) {
-        promiseCollection.push(wrapper(config.context, config.selector, config.sub).then(result => {
-          const handled = config.handler ? config.handler(result) : result;
-          this.userData[key as keyof IUserData] = handled;
-        }).catch(err => {}));
-      }
-    })
-
-    const pages = await wrapper('ol.pagination.actions', ['li'], '/works');
-    if (pages && Array.isArray(pages)) {
-      const lastPage = Number(pages[pages.length - 2]);
-      if (lastPage && lastPage !== NaN) {
-        promiseCollection.push(wrapper('ol.work.index.group', [{li: {}}], '/works').then((result => {
-          console.log({works: result});
-        })))
+        this.birthday = meta.querySelector("dd.birthday")?.text ?? undefined;
       }
     }
 
+    this.isResolved = true;
+    this.lastResolved = new Date();
+  }
+}
 
-    
-    return Promise.all(promiseCollection).then(() => {
-      this.isResolved = true;
-      this.lastResolved = new Date();
-    })
+export class User {
+  username: string;
+  profile: Profile;
+  works: Map<string, Work> = new Map<string, Work>();
+
+  isResolved: boolean = false;
+  lastResolved: Date | null = null;
+
+  constructor(username: string) {
+    this.username = username;
+    this.profile = new Profile(username);
   }
 
-  static async get_user(userId: string): Promise<User> {
-    const user = new User(userId);
-    await user.resolve();
-    return user;
-  }
+  public async resolve() {
+    await this.profile.resolve();
 
+    const page1 = parse(
+      (
+        await axios.get(`${BASE_URL}/${encodeURI(this.username)}/works`, {
+          params: { page: 1 },
+        })
+      ).data
+    ).querySelector("#main");
+    const max = Math.max(
+      ...(page1
+        ?.querySelector(".pagination.actions")
+        ?.querySelectorAll("li")
+        .map((_) => {
+          const raw = _.text;
+          const num = Number(raw);
+          const isNaN = Number.isNaN(num);
+          return isNaN ? Number.MIN_SAFE_INTEGER : num;
+        }) ?? [0])
+    );
+    const pages = [page1];
+    for (let i = 2; i <= max; i++) {
+      const delay = 1200 * (i - 1);
+      await setTimeout(
+        async () =>
+          await axios
+            .get(`${BASE_URL}/${encodeURI(this.username)}/works`, {
+              params: { page: i },
+            })
+            .then((resp) =>
+              pages.push(parse(resp.data).querySelector("#main"))
+            ),
+        delay
+      );
+    }
+
+    pages.forEach((page) => {
+      const works = page
+        ?.querySelector(".work.index.group")
+        ?.querySelectorAll("li.work")
+        ?.map((_) => _.id.split("_")[1] ?? undefined);
+      works?.forEach((work) => {
+        if (!this.works.has(work)) {
+        }
+      });
+    });
+    // console.log(pages);
+    // pages.forEach(page => {
+    //   const works = page?.querySelector('.work.index.group')?.querySelectorAll('li.work')?.map(_ => _.id.split('_')[1] ?? undefined);
+    //   works?.forEach(work => {
+    //     if(!this.works.has(work)) {
+
+    //     }
+    //   })
+    // })
+
+    // const resolveWorks = async (currentIndex: number = 1, max?: number) => {
+    //   console.log('running resolveWorks');
+    //   console.log({currentIndex, max});
+    //   const raw =
+    //   const worksPage = parse(raw.data).querySelector('#main');
+    //   if (!worksPage) {return;}
+    //   console.log ('found works page');
+    //   let curMax = max;
+    //   if (curMax === undefined) {
+    //     const paginator = worksPage.querySelector('.pagination.actions')?.querySelectorAll('li').map(_ => _.text).reverse();
+    //     if (!paginator) return;
+    //     for(let i = 0; i < paginator.length; i++) {
+    //       const p = paginator[i];
+    //       const n = Number(p) ?? 0;
+    //       curMax = n;
+    //       if (n > 0) {
+    //         break;
+    //       }
+    //     }
+    //   }
+    //   console.log({curMax})
+
+    //   const works = worksPage.querySelector('.work.index.group')?.querySelectorAll('li.work')?.map(_ => _.id.split('_')[1] ?? undefined);
+    //   works?.forEach(_ => {
+    //     if(!this.works.has(_)) {
+    //       this.works.set(_, new Work(_));
+    //     }
+    //   });
+
+    //   if ((currentIndex + 1) <= (curMax ?? 0)) {
+    //     resolveWorks(currentIndex + 1, curMax);
+    //   } else {
+    //     return;
+    //   }
+    // }
+
+    // await resolveWorks();
+
+    this.isResolved = true;
+    this.lastResolved = new Date();
+  }
 }
